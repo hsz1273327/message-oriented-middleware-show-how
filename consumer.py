@@ -1,5 +1,4 @@
 import uuid
-import random
 import asyncio
 import aio_pika
 
