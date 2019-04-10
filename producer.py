@@ -1,54 +1,59 @@
-import sys
-import time
 import random
-import threading
-from kafka import KafkaProducer
-from kafka import KafkaConsumer
+import asyncio
+import aio_pika
+
+AMQP_URL = 'amqp://guest:guest@localhost:5672/'
 
 
-kfkproducer = KafkaProducer(bootstrap_servers='localhost:9092')
-
-sourceQ = "sourceQ"
-resultQ = "resultQ"
-exitCh = "exitCh"
-
-
-def push(Q, value):
-    future = kfkproducer.send(Q,str(value).encode())
-    result = future.get(timeout=10)
-    print(f"send {value} to {Q},{result}")
-
-
-def producer():
+async def producer(channel):
     while True:
         data = random.randint(1, 400)
-        push(sourceQ, data)
-        time.sleep(1)
+        await channel.default_exchange.publish(
+            aio_pika.Message(body=str(data).encode()),
+            routing_key="sourceQ"
+        )
+        print(f"send {data} to sourceQ")
+        await asyncio.sleep(1)
 
 
-def collector():
+async def collector(Q):
     sum = 0
-    consumer = KafkaConsumer(resultQ, group_id=resultQ, bootstrap_servers='localhost:9092')
-    for msg in consumer:
-        print(f"received {msg}")
-        sum += int(msg.value.decode("utf-8"))
-        print(f"get sum {sum}")
+    async with Q.iterator() as queue_iter:
+            # Cancel consuming after __aexit__
+        async for message in queue_iter:
+            async with message.process():
+                print(f"received {message.body}")
+                sum += int(message.body)
+                print(f"get sum {sum}")
 
 
-def main():
-    t = threading.Thread(target=collector, daemon=True)
-    t.start()
-    try:
-        print("start")
-        producer()
-    except KeyboardInterrupt:
-        push(exitCh, "Exit")
-    except Exception as e:
-        print(e)
-        raise e
-    finally:
-        sys.exit()
+async def pubExt():
+    print("exit publishing")
+    connection = await aio_pika.connect_robust(AMQP_URL)
+    async with connection:
+        exitCh = await connection.channel(2)
+        ex = await exitCh.declare_exchange('exitCh', type=aio_pika.exchange.ExchangeType.FANOUT)
+        await ex.publish(aio_pika.Message(body=b"Exit"), routing_key="")
+    print("exit published")
+
+
+async def main():
+    connection = await aio_pika.connect_robust(AMQP_URL)
+    async with connection:
+        # Creating channel
+        channel = await connection.channel(1)    # type: aio_pika.Channel
+        await channel.declare_queue("sourceQ")
+        resultQ = await channel.declare_queue("resultQ")
+        prodcor = producer(channel)
+        collcor = collector(resultQ)
+        await asyncio.gather(prodcor, collcor)
 
 
 if __name__ == "__main__":
-    main()
+    print("producer start")
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        asyncio.get_event_loop().run_until_complete(pubExt())
+    finally:
+        print("done")

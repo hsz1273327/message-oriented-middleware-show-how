@@ -1,45 +1,49 @@
-import sys
 import uuid
-import time
-import threading
-from kafka import KafkaProducer
-from kafka import KafkaConsumer
-from kafka import TopicPartition
+import random
+import asyncio
+import aio_pika
 
 
-kfkproducer = KafkaProducer(bootstrap_servers='localhost:9092')
-
-sourceQ = "sourceQ"
-resultQ = "resultQ"
-exitCh = "exitCh"
+AMQP_URL = 'amqp://guest:guest@localhost:5672/'
 
 
-def push(Q, value):
-    future = kfkproducer.send(Q, str(value).encode())
-    result = future.get(timeout=10)
-    print(f"send {value} to {Q},{result}")
+async def consumer(sourceQ, channel):
+    async with sourceQ.iterator() as queue_iter:
+            # Cancel consuming after __aexit__
+        async for message in queue_iter:
+            async with message.process():
+                print(f"received {message.body}")
+                result = int(message.body.decode("utf-8"))**2
+            await channel.default_exchange.publish(
+                aio_pika.Message(body=str(result).encode()),
+                routing_key="resultQ"
+            )
+            print(f"send {result} to resultQ")
 
 
-def get_result():
-    PARTITION_0 = 0
-    consumer = KafkaConsumer(sourceQ, group_id=sourceQ, bootstrap_servers='localhost:9092')
-    for msg in consumer:
-        print(f"received {msg}")
-        data = int(msg.value.decode("utf-8"))
-        push(resultQ, int(data)**2)
+async def main():
+    connection = await aio_pika.connect_robust(AMQP_URL)
 
-
-def main():
-    t = threading.Thread(target=get_result, daemon=True)
-    t.start()
-    group_id = str(uuid.uuid4())
-    print(f"group_id:{group_id}")
-    consumer = KafkaConsumer(exitCh, group_id=group_id, bootstrap_servers='localhost:9092')
-    for msg in consumer:
-        print(msg)
-        if msg.value == b"Exit":
-            sys.exit(0)
+    async with connection:
+            # Creating channel
+        channel = await connection.channel(1)    # type: aio_pika.Channel
+        sourceQ = await channel.declare_queue("sourceQ")
+        await channel.declare_queue("resultQ")
+        exitCh = await connection.channel(2)
+        extE = await exitCh.declare_exchange('exitCh', type=aio_pika.exchange.ExchangeType.FANOUT)
+        q_id = str(uuid.uuid4())
+        extQ = await exitCh.declare_queue(q_id, auto_delete=True)
+        await extQ.bind(extE)
+        task = asyncio.ensure_future(consumer(sourceQ, channel))
+        async with extQ.iterator() as queue_iter:
+            async for message in queue_iter:
+                async with message.process():
+                    print(f"received {message.body}")
+                    if message.body == b"Exit":
+                        task.cancel()
+                        return
 
 
 if __name__ == "__main__":
-    main()
+    print("consumer start")
+    asyncio.run(main())
