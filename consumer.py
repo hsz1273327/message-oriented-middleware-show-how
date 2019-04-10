@@ -1,54 +1,44 @@
 import sys
+import uuid
 import time
 import threading
-from redis import Redis
+from kafka import KafkaProducer
+from kafka import KafkaConsumer
+from kafka import TopicPartition
 
-redis = Redis.from_url('redis://localhost:6379/2')
+
+kfkproducer = KafkaProducer(bootstrap_servers='localhost:9092')
+
 sourceQ = "sourceQ"
 resultQ = "resultQ"
 exitCh = "exitCh"
 
 
 def push(Q, value):
-    if redis.exists(Q):
-        if redis.type(Q) == "list":
-            redis.xlpush(Q, value)
-        else:
-            redis.delete(Q)
-            redis.lpush(Q, value)
-    else:
-        redis.lpush(Q, value)
-    print(f"send {value} to {Q}")
+    future = kfkproducer.send(Q, str(value).encode())
+    result = future.get(timeout=10)
+    print(f"send {value} to {Q},{result}")
 
 
 def get_result():
-    while True:
-        if redis.exists(sourceQ) and redis.type(sourceQ) == b"list":
-            data = redis.rpop(sourceQ)
-            if data:
-                print(f"received {data.decode()}")
-                push(resultQ, int(data)**2)
-            else:
-                time.sleep(1)
-        else:
-            time.sleep(1)
+    PARTITION_0 = 0
+    consumer = KafkaConsumer(sourceQ, group_id=sourceQ, bootstrap_servers='localhost:9092')
+    for msg in consumer:
+        print(f"received {msg}")
+        data = int(msg.value.decode("utf-8"))
+        push(resultQ, int(data)**2)
 
 
 def main():
     t = threading.Thread(target=get_result, daemon=True)
     t.start()
-    p = redis.pubsub()
-    p.subscribe('exitCh')
-    while True:
-        message = p.get_message()
-        if message:
-            if message.get("data") == b"Exit":
-                p.close()
-                sys.exit(0)
-            else:
-                time.sleep(1)
-        else:
-            time.sleep(1)
+    group_id = str(uuid.uuid4())
+    print(f"group_id:{group_id}")
+    consumer = KafkaConsumer(exitCh, group_id=group_id, bootstrap_servers='localhost:9092')
+    for msg in consumer:
+        print(msg)
+        if msg.value == b"Exit":
+            sys.exit(0)
 
 
 if __name__ == "__main__":

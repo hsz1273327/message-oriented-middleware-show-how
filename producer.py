@@ -2,9 +2,11 @@ import sys
 import time
 import random
 import threading
-from redis import Redis
+from kafka import KafkaProducer
+from kafka import KafkaConsumer
 
-redis = Redis.from_url('redis://localhost:6379/2')
+
+kfkproducer = KafkaProducer(bootstrap_servers='localhost:9092')
 
 sourceQ = "sourceQ"
 resultQ = "resultQ"
@@ -12,15 +14,9 @@ exitCh = "exitCh"
 
 
 def push(Q, value):
-    if redis.exists(Q):
-        if redis.type(Q) == "list":
-            redis.xlpush(Q, value)
-        else:
-            redis.delete(Q)
-            redis.lpush(Q, value)
-    else:
-        redis.lpush(Q, value)
-    print(f"send {value} to {Q}")
+    future = kfkproducer.send(Q,str(value).encode())
+    result = future.get(timeout=10)
+    print(f"send {value} to {Q},{result}")
 
 
 def producer():
@@ -32,27 +28,23 @@ def producer():
 
 def collector():
     sum = 0
-    while True:
-        if redis.exists(resultQ) and redis.type(resultQ) == b"list":
-            data = redis.rpop(resultQ)
-            if data:
-                print(f"received {data.decode()}")
-                sum += int(data)
-                print(f"get sum {sum}")
-            else:
-                time.sleep(1)
-        else:
-            time.sleep(1)
+    consumer = KafkaConsumer(resultQ, group_id=resultQ, bootstrap_servers='localhost:9092')
+    for msg in consumer:
+        print(f"received {msg}")
+        sum += int(msg.value.decode("utf-8"))
+        print(f"get sum {sum}")
 
 
 def main():
     t = threading.Thread(target=collector, daemon=True)
     t.start()
     try:
+        print("start")
         producer()
     except KeyboardInterrupt:
-        redis.publish(exitCh, 'Exit')
+        push(exitCh, "Exit")
     except Exception as e:
+        print(e)
         raise e
     finally:
         sys.exit()
