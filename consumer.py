@@ -1,55 +1,60 @@
 import sys
-import time
+import asyncio
 import threading
-from redis import Redis
+from aredis import StrictRedis
 
-redis = Redis.from_url('redis://localhost:6379/2')
+REDIS_URL = "redis://localhost"
+redis = StrictRedis.from_url(REDIS_URL)
+p = redis.pubsub()
 sourceQ = "sourceQ"
 resultQ = "resultQ"
 exitCh = "exitCh"
 
 
-def push(Q, value):
+async def push(Q, value):
     if redis.exists(Q):
         if redis.type(Q) == "list":
-            redis.xlpush(Q, value)
+            await redis.xlpush(Q, value)
         else:
-            redis.delete(Q)
-            redis.lpush(Q, value)
+            await redis.delete(Q)
+            await redis.lpush(Q, value)
     else:
-        redis.lpush(Q, value)
+        await redis.lpush(Q, value)
     print(f"send {value} to {Q}")
 
 
-def get_result():
+async def get_result():
     while True:
-        if redis.exists(sourceQ) and redis.type(sourceQ) == b"list":
-            data = redis.rpop(sourceQ)
+        if await redis.exists(sourceQ) and await redis.type(sourceQ) == b"list":
+            data = await redis.rpop(sourceQ)
             if data:
                 print(f"received {data.decode()}")
-                push(resultQ, int(data)**2)
+                await push(resultQ, int(data)**2)
             else:
-                time.sleep(1)
+                await asyncio.sleep(1)
         else:
-            time.sleep(1)
+            await asyncio.sleep(1)
 
 
-def main():
-    t = threading.Thread(target=get_result, daemon=True)
-    t.start()
-    p = redis.pubsub()
-    p.subscribe('exitCh')
+async def main():
+    task = asyncio.ensure_future(get_result())
+    await p.subscribe('exitCh')
     while True:
-        message = p.get_message()
+        message = await p.get_message()
         if message:
             if message.get("data") == b"Exit":
                 p.close()
                 sys.exit(0)
             else:
-                time.sleep(1)
+                await asyncio.sleep(1)
         else:
-            time.sleep(1)
+            await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()

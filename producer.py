@@ -1,62 +1,79 @@
 import sys
-import time
+import asyncio
 import random
 import threading
-from redis import Redis
+from aredis import StrictRedis
 
-redis = Redis.from_url('redis://localhost:6379/2')
+REDIS_URL = "redis://localhost"
+redis = StrictRedis.from_url(REDIS_URL)
+
 
 sourceQ = "sourceQ"
 resultQ = "resultQ"
 exitCh = "exitCh"
 
 
-def push(Q, value):
-    if redis.exists(Q):
-        if redis.type(Q) == "list":
-            redis.xlpush(Q, value)
-        else:
-            redis.delete(Q)
-            redis.lpush(Q, value)
-    else:
-        redis.lpush(Q, value)
-    print(f"send {value} to {Q}")
-
-
-def producer():
-    while True:
-        data = random.randint(1, 400)
-        push(sourceQ, data)
-        time.sleep(1)
-
-
-def collector():
-    sum = 0
-    while True:
-        if redis.exists(resultQ) and redis.type(resultQ) == b"list":
-            data = redis.rpop(resultQ)
-            if data:
-                print(f"received {data.decode()}")
-                sum += int(data)
-                print(f"get sum {sum}")
-            else:
-                time.sleep(1)
-        else:
-            time.sleep(1)
-
-
-def main():
-    t = threading.Thread(target=collector, daemon=True)
-    t.start()
+async def push(Q, value):
     try:
-        producer()
+        if await redis.exists(Q):
+            if await redis.type(Q) == "list":
+                await redis.xlpush(Q, value)
+            else:
+                await redis.delete(Q)
+                await redis.lpush(Q, value)
+        else:
+            await redis.lpush(Q, value)
+        print(f"send {value} to {Q}")
     except KeyboardInterrupt:
-        redis.publish(exitCh, 'Exit')
+        await redis.publish(exitCh, 'Exit')
+    except Exception as e:
+        raise e
+
+
+async def producer():
+    try:
+        while True:
+            data = random.randint(1, 400)
+            await push(sourceQ, data)
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        await redis.publish(exitCh, 'Exit')
+    except Exception as e:
+        raise e
+
+
+async def collector():
+    try:
+        sum = 0
+        while True:
+            if await redis.exists(resultQ) and await redis.type(resultQ) == b"list":
+                data = await redis.rpop(resultQ)
+                if data:
+                    print(f"received {data.decode()}")
+                    sum += int(data)
+                    print(f"get sum {sum}")
+                else:
+                    await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        await redis.publish(exitCh, 'Exit')
+    except Exception as e:
+        raise e
+
+
+async def main():
+    task = asyncio.ensure_future(collector())
+    await producer()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        loop.run_until_complete(redis.publish(exitCh, 'Exit'))
     except Exception as e:
         raise e
     finally:
-        sys.exit()
-
-
-if __name__ == "__main__":
-    main()
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
