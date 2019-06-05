@@ -1,6 +1,5 @@
 import sys
 import asyncio
-import threading
 from aredis import StrictRedis
 
 REDIS_URL = "redis://localhost"
