@@ -1,54 +1,55 @@
 import sys
-import time
 import random
-import threading
-from kafka import KafkaProducer
-from kafka import KafkaConsumer
+import asyncio
+from aiokafka import AIOKafkaProducer
+from aiokafka import AIOKafkaConsumer
 
 
-kfkproducer = KafkaProducer(bootstrap_servers='localhost:9092')
+loop = asyncio.get_event_loop()
 
 sourceQ = "sourceQ"
 resultQ = "resultQ"
 exitCh = "exitCh"
 
+kfkproducer = AIOKafkaProducer(loop=loop, bootstrap_servers='localhost:9092')
+consumer = AIOKafkaConsumer(resultQ,loop=loop, bootstrap_servers='localhost:9092',group_id=resultQ)
+async def push(Q, value):
+    await kfkproducer.send_and_wait(Q,str(value).encode())
+    print(f"send {value} to {Q}")
 
-def push(Q, value):
-    future = kfkproducer.send(Q,str(value).encode())
-    result = future.get(timeout=10)
-    print(f"send {value} to {Q},{result}")
 
-
-def producer():
+async def producer():
     while True:
         data = random.randint(1, 400)
-        push(sourceQ, data)
-        time.sleep(1)
+        await push(sourceQ, data)
+        await asyncio.sleep(1)
 
 
-def collector():
+async def collector():
     sum = 0
-    consumer = KafkaConsumer(resultQ, group_id=resultQ, bootstrap_servers='localhost:9092')
-    for msg in consumer:
+    async for msg in consumer:
         print(f"received {msg}")
         sum += int(msg.value.decode("utf-8"))
         print(f"get sum {sum}")
 
 
-def main():
-    t = threading.Thread(target=collector, daemon=True)
-    t.start()
-    try:
-        print("start")
-        producer()
-    except KeyboardInterrupt:
-        push(exitCh, "Exit")
-    except Exception as e:
-        print(e)
-        raise e
-    finally:
-        sys.exit()
+async def main():
+    task = asyncio.ensure_future(collector())
+    print("start")
+    await producer()
 
 
 if __name__ == "__main__":
-    main()
+    loop.run_until_complete(kfkproducer.start())
+    loop.run_until_complete(consumer.start())
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        loop.run_until_complete(push(exitCh, "Exit"))
+    except Exception as e:
+        raise e
+    finally:
+        loop.run_until_complete(kfkproducer.stop())
+        loop.run_until_complete(consumer.stop())
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
